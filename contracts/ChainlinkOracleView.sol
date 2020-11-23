@@ -95,38 +95,19 @@ contract Ownable is Context {
     }
 }
 
-// Source: https://github.com/smartcontractkit/chainlink/blob/develop/evm-contracts/src/v0.6/interfaces/AggregatorV3Interface.sol
-interface AggregatorV3Interface {
-    function decimals() external view returns (uint8);
+interface AggregatorInterface {
+    function latestAnswer() external view returns (int256);
+    function latestTimestamp() external view returns (uint256);
+    function latestRound() external view returns (uint256);
+    function getAnswer(uint256 roundId) external view returns (int256);
+    function getTimestamp(uint256 roundId) external view returns (uint256);
 
-    function description() external view returns (string memory);
+    event AnswerUpdated(int256 indexed current, uint256 indexed roundId, uint256 updatedAt);
+    event NewRound(uint256 indexed roundId, address indexed startedBy, uint256 startedAt);
+}
 
-    function version() external view returns (uint256);
-
-    // getRoundData and latestRoundData should both raise "No data present"
-    // if they do not have data to report, instead of returning unset values
-    // which could be misinterpreted as actual reported values.
-    function getRoundData(uint80 _roundId)
-        external
-        view
-        returns (
-            uint80 roundId,
-            int256 answer,
-            uint256 startedAt,
-            uint256 updatedAt,
-            uint80 answeredInRound
-        );
-
-    function latestRoundData()
-        external
-        view
-        returns (
-            uint80 roundId,
-            int256 answer,
-            uint256 startedAt,
-            uint256 updatedAt,
-            uint80 answeredInRound
-        );
+interface BProtocol {
+      function calledByPool() external returns(bool);
 }
 
 contract PriceOracle {
@@ -152,6 +133,7 @@ contract ChainlinkOracleView is Ownable, PriceOracle {
     bool public constant isPriceOracle = true;
 
     address public ethUsdChainlinkAggregatorAddress;
+    address public bProtocolAddress;
 
     struct TokenConfig {
         address chainlinkAggregatorAddress;
@@ -163,6 +145,20 @@ contract ChainlinkOracleView is Ownable, PriceOracle {
 
     constructor(address ethUsdChainlinkAggregatorAddress_) public {
         ethUsdChainlinkAggregatorAddress = ethUsdChainlinkAggregatorAddress_;
+    }
+
+    function getChainlinkPrice(address chainlinkOracleAddress, bool bProtocol)
+        internal
+        view
+        returns(int256) {
+
+        AggregatorInterface chainlink = AggregatorInterface(chainlinkOracleAddress);
+
+        uint roundId = chainlink.latestRound();
+        uint minRound = roundId > 10 ? roundId - 10 : 0;
+        while(!bProtocol && roundId > minRound && (chainlink.getTimeStamp(roundId) > now - 10 minutes)) roundId--;
+
+        return chainlink.getAnswer(roundId);
     }
 
     /**
@@ -177,12 +173,9 @@ contract ChainlinkOracleView is Ownable, PriceOracle {
         returns (uint256)
     {
         TokenConfig memory config = tokenConfig[address(slToken)];
+        bool bProtocol = BProtocol(bProtocolAddress).calledByPool();
 
-        (, int256 chainlinkPrice, , , ) = AggregatorV3Interface(
-            config
-                .chainlinkAggregatorAddress
-        )
-            .latestRoundData();
+        int chainlinkPrice = getChainlinkPrice(config.chainlinkAggregatorAddress, bProtocol);
 
         require(chainlinkPrice > 0, "Chainlink price feed invalid");
 
@@ -193,10 +186,7 @@ contract ChainlinkOracleView is Ownable, PriceOracle {
                 10**config.underlyingTokenDecimals
             );
         } else if (config.chainlinkPriceBase == 2) {
-            (, int256 ethPriceInUsd, , , ) = AggregatorV3Interface(
-                ethUsdChainlinkAggregatorAddress
-            )
-                .latestRoundData();
+            int256 ethPriceInUsd = getChainlinkPrice(ethUsdChainlinkAggregatorAddress, bProtocol);
 
             require(ethPriceInUsd > 0, "ETH price invalid");
 
@@ -218,6 +208,13 @@ contract ChainlinkOracleView is Ownable, PriceOracle {
         onlyOwner
     {
         ethUsdChainlinkAggregatorAddress = addr;
+    }
+
+    function setBProtocolAddress(address addr)
+        external
+        onlyOwner
+    {
+        bProtocolAddress = addr;
     }
 
     function setTokenConfigs(
